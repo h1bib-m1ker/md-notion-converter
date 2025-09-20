@@ -1,0 +1,513 @@
+# General Purpose Markdown to Notion Converter - FIXED VERSION
+import json
+import re
+import base64
+
+def create_rich_text(text):
+    """Create Notion rich text with markdown formatting preserved"""
+    if not text:
+        return []
+    
+    segments = []
+    current_pos = 0
+    
+    # Define markdown patterns with their corresponding Notion annotations
+    patterns = [
+        (r'\*\*\*(.*?)\*\*\*', {'bold': True, 'italic': True}),  # Bold + Italic
+        (r'\*\*(.*?)\*\*', {'bold': True}),                      # Bold
+        (r'\*(.*?)\*', {'italic': True}),                        # Italic
+        (r'~~(.*?)~~', {'strikethrough': True}),                 # Strikethrough
+        (r'`(.*?)`', {'code': True}),                            # Inline code
+        (r'__(.*?)__', {'underline': True}),                     # Underline
+    ]
+    
+    # Find all formatting matches
+    all_matches = []
+    for pattern, annotations in patterns:
+        for match in re.finditer(pattern, text):
+            all_matches.append({
+                'start': match.start(),
+                'end': match.end(),
+                'content': match.group(1),
+                'annotations': annotations,
+                'full_match': match.group(0)
+            })
+    
+    # Sort matches by position
+    all_matches.sort(key=lambda x: x['start'])
+    
+    # Remove overlapping matches (keep the first one)
+    filtered_matches = []
+    for match in all_matches:
+        overlap = False
+        for existing in filtered_matches:
+            if (match['start'] < existing['end'] and match['end'] > existing['start']):
+                overlap = True
+                break
+        if not overlap:
+            filtered_matches.append(match)
+    
+    # Create segments
+    for match in filtered_matches:
+        # Add plain text before the match
+        if current_pos < match['start']:
+            plain_text = text[current_pos:match['start']]
+            if plain_text:
+                segments.append({
+                    "type": "text",
+                    "text": {"content": plain_text},
+                    "annotations": {
+                        "bold": False,
+                        "italic": False,
+                        "strikethrough": False,
+                        "underline": False,
+                        "code": False,
+                        "color": "default"
+                    }
+                })
+        
+        # Add formatted text
+        segments.append({
+            "type": "text",
+            "text": {"content": match['content']},
+            "annotations": {
+                "bold": match['annotations'].get('bold', False),
+                "italic": match['annotations'].get('italic', False),
+                "strikethrough": match['annotations'].get('strikethrough', False),
+                "underline": match['annotations'].get('underline', False),
+                "code": match['annotations'].get('code', False),
+                "color": "default"
+            }
+        })
+        
+        current_pos = match['end']
+    
+    # Add remaining plain text
+    if current_pos < len(text):
+        remaining_text = text[current_pos:]
+        if remaining_text:
+            segments.append({
+                "type": "text",
+                "text": {"content": remaining_text},
+                "annotations": {
+                    "bold": False,
+                    "italic": False,
+                    "strikethrough": False,
+                    "underline": False,
+                    "code": False,
+                    "color": "default"
+                }
+            })
+    
+    # If no formatting found, return simple segment
+    if not segments:
+        segments.append({
+            "type": "text",
+            "text": {"content": text},
+            "annotations": {
+                "bold": False,
+                "italic": False,
+                "strikethrough": False,
+                "underline": False,
+                "code": False,
+                "color": "default"
+            }
+        })
+    
+    return segments
+
+def is_single_bold_line(line):
+    """Check if a line is entirely bold (like **Pros** or **Section Title**)"""
+    stripped = line.strip()
+    return (stripped.startswith('**') and stripped.endswith('**') and 
+            stripped.count('**') == 2 and len(stripped) > 4)
+
+def markdown_to_blocks(text):
+    """Convert markdown to Notion blocks - preserving all original structure"""
+    if not text:
+        return []
+    
+    lines = text.split('\n')
+    blocks = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].rstrip()
+        
+        # Empty lines - skip but preserve structure by not adding anything
+        if not line:
+            i += 1
+            continue
+        
+        # NEW: Handle single bold lines specifically (like **Pros**, **Cons**, etc.)
+        if is_single_bold_line(line):
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": create_rich_text(line.strip()),
+                    "color": "default"
+                }
+            })
+            i += 1
+            continue
+        
+        # Callout detection - starts with .===
+        if line.strip() == '.===':
+            callout_content = []
+            callout_heading = None
+            i += 1  # Skip opening .===
+            
+            # Collect all content until closing .===
+            while i < len(lines) and lines[i].strip() != '.===':
+                current_line = lines[i].rstrip()
+                
+                # Detect heading inside callout
+                if current_line.startswith('###'):
+                    callout_heading = current_line[3:].strip()
+                elif current_line.strip():  # Non-empty content
+                    callout_content.append(current_line)
+                elif callout_content:  # Empty line but we have content (preserve spacing)
+                    callout_content.append('')
+                
+                i += 1
+            
+            # Create callout block with children
+            callout_children = []
+            
+            # Add heading if found
+            if callout_heading:
+                callout_children.append({
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {
+                        "rich_text": create_rich_text(callout_heading),
+                        "color": "default"
+                    }
+                })
+            
+            # Process callout content
+            if callout_content:
+                # Join content and process as mini-markdown
+                content_text = '\n'.join(callout_content).strip()
+                if content_text:
+                    # Split into paragraphs
+                    paragraphs = content_text.split('\n\n')
+                    for paragraph in paragraphs:
+                        paragraph = paragraph.strip()
+                        if paragraph:
+                            callout_children.append({
+                                "object": "block",
+                                "type": "paragraph",
+                                "paragraph": {
+                                    "rich_text": create_rich_text(paragraph.replace('\n', ' ')),
+                                    "color": "default"
+                                }
+                            })
+            
+            # Create the callout block structure you described
+            # First: Empty callout block
+            blocks.append({
+                "object": "block",
+                "type": "callout",
+                "callout": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": ""},
+                        "annotations": {
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "default"
+                        }
+                    }],
+                    "icon": {"type": "emoji", "emoji": "💡"},
+                    "color": "default"
+                }
+            })
+            
+            # Then: Add all children as separate blocks after the callout
+            for child in callout_children:
+                blocks.append(child)
+            
+            i += 1  # Skip closing .===
+            continue
+        
+        # Headers H1-H6
+        if line.startswith('#'):
+            header_level = 0
+            for char in line:
+                if char == '#':
+                    header_level += 1
+                else:
+                    break
+            
+            content = line[header_level:].strip()
+            
+            if header_level == 1:
+                blocks.append({
+                    "object": "block",
+                    "type": "heading_1",
+                    "heading_1": {
+                        "rich_text": create_rich_text(content),
+                        "color": "default"
+                    }
+                })
+            elif header_level == 2:
+                blocks.append({
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": create_rich_text(content),
+                        "color": "default"
+                    }
+                })
+            else:  # H3 and above
+                blocks.append({
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {
+                        "rich_text": create_rich_text(content),
+                        "color": "default"
+                    }
+                })
+            i += 1
+            continue
+        
+        # Code blocks
+        if line.startswith('```'):
+            code_content = []
+            language = line[3:].strip() if len(line) > 3 else ""
+            i += 1
+            
+            while i < len(lines) and not lines[i].startswith('```'):
+                code_content.append(lines[i])
+                i += 1
+            
+            blocks.append({
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": '\n'.join(code_content)},
+                        "annotations": {
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "default"
+                        }
+                    }],
+                    "language": language if language else "plain text"
+                }
+            })
+            i += 1  # Skip closing ```
+            continue
+        
+        # Blockquotes
+        if line.startswith('>'):
+            quote_lines = []
+            while i < len(lines) and lines[i].startswith('>'):
+                quote_content = lines[i][1:].strip()
+                if quote_content:
+                    quote_lines.append(quote_content)
+                i += 1
+            
+            if quote_lines:
+                blocks.append({
+                    "object": "block",
+                    "type": "quote",
+                    "quote": {
+                        "rich_text": create_rich_text(' '.join(quote_lines)),
+                        "color": "default"
+                    }
+                })
+            continue
+        
+        # Enhanced Unordered lists with nesting support (- or *)
+        if line.lstrip().startswith('- ') or line.lstrip().startswith('* '):
+            def process_nested_list(start_index):
+                list_blocks = []
+                j = start_index
+                
+                while j < len(lines):
+                    current_line = lines[j]
+                    stripped = current_line.lstrip()
+                    
+                    # Check if this is a list item
+                    if not (stripped.startswith('- ') or stripped.startswith('* ')):
+                        break
+                        
+                    # Calculate indentation level
+                    indent_level = len(current_line) - len(stripped)
+                    content = stripped[2:].strip()  # Remove '- ' or '* '
+                    
+                    # Create the list item block
+                    list_item = {
+                        "object": "block",
+                        "type": "bulleted_list_item", 
+                        "bulleted_list_item": {
+                            "rich_text": create_rich_text(content),
+                            "color": "default"
+                        }
+                    }
+                    
+                    # Look ahead for children (more indented items)
+                    children = []
+                    k = j + 1
+                    while k < len(lines):
+                        next_line = lines[k]
+                        next_stripped = next_line.lstrip()
+                        
+                        if not next_stripped:  # Skip empty lines
+                            k += 1
+                            continue
+                            
+                        if not (next_stripped.startswith('- ') or next_stripped.startswith('* ')):
+                            break
+                            
+                        next_indent = len(next_line) - len(next_stripped)
+                        
+                        # If next item is more indented, it's a child
+                        if next_indent > indent_level:
+                            child_blocks, k = process_nested_list(k)
+                            children.extend(child_blocks)
+                        else:
+                            break
+                    
+                    # Add children if any
+                    if children:
+                        list_item["bulleted_list_item"]["children"] = children
+                        
+                    list_blocks.append(list_item)
+                    j = k if k > j + 1 else j + 1
+                    
+                return list_blocks, j
+            
+            # Process the nested list starting from current position
+            nested_blocks, i = process_nested_list(i)
+            blocks.extend(nested_blocks)
+            continue
+        
+        # Ordered lists (1. 2. etc.)
+        if re.match(r'^\d+\.\s', line):
+            list_items = []
+            while i < len(lines) and re.match(r'^\d+\.\s', lines[i]):
+                content = re.sub(r'^\d+\.\s', '', lines[i])
+                list_items.append(content)
+                i += 1
+            
+            for item in list_items:
+                blocks.append({
+                    "object": "block",
+                    "type": "numbered_list_item",
+                    "numbered_list_item": {
+                        "rich_text": create_rich_text(item),
+                        "color": "default"
+                    }
+                })
+            continue
+        
+        # Horizontal rules
+        if line.strip() in ['---', '***', '___']:
+            blocks.append({
+                "object": "block",
+                "type": "divider",
+                "divider": {}
+            })
+            i += 1
+            continue
+        
+        # Tables (basic detection)
+        if '|' in line and i + 1 < len(lines) and '|' in lines[i + 1]:
+            # Simple table - convert to paragraph with formatted text for now
+            table_lines = []
+            while i < len(lines) and '|' in lines[i]:
+                table_lines.append(lines[i])
+                i += 1
+            
+            # Convert table to formatted text block
+            table_text = '\n'.join(table_lines)
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": create_rich_text(table_text),
+                    "color": "default"
+                }
+            })
+            continue
+        
+        # IMPROVED: Regular paragraphs - now handles single lines better
+        paragraph_lines = []
+        
+        # Collect the current line first
+        if line.strip():
+            paragraph_lines.append(line.strip())
+            i += 1
+        
+        # Then collect additional lines that belong to the same paragraph
+        while (i < len(lines) and 
+               lines[i].strip() and  # Not empty
+               not lines[i].startswith(('#', '>', '-', '*', '```', '---', '***', '___')) and  # Not special syntax
+               not re.match(r'^\d+\.\s', lines[i]) and  # Not numbered list
+               '|' not in lines[i] and  # Not table
+               not is_single_bold_line(lines[i])):  # Not a single bold line
+            paragraph_lines.append(lines[i].strip())
+            i += 1
+        
+        # Create paragraph block if we have content
+        if paragraph_lines:
+            paragraph_text = ' '.join(paragraph_lines)
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": create_rich_text(paragraph_text),
+                    "color": "default"
+                }
+            })
+        
+        # If we didn't process anything, advance the counter to avoid infinite loop
+        if not paragraph_lines and i < len(lines):
+            i += 1
+    
+    return blocks
+
+# PUT YOUR MARKDOWN HERE
+my_markdown = """[markdown]"""
+
+# Try to get Input parameter first, then use hardcoded content
+try:
+    if 'Input' in locals() or 'Input' in globals():
+        final_content = Input
+        source = "parameter_input"
+    else:
+        final_content = my_markdown
+        source = "hardcoded_content"
+except:
+    final_content = my_markdown
+    source = "hardcoded_fallback"
+
+# Convert to Notion blocks
+blocks = markdown_to_blocks(final_content)
+
+# Encode the blocks array DIRECTLY (not wrapped in "children")
+result = json.dumps(blocks, ensure_ascii=False, separators=(',', ':'))
+
+# Base64 encode the blocks array
+encoded_blocks = base64.b64encode(result.encode('utf-8')).decode('utf-8')
+
+# Create output for Make.com
+output = {
+    "encodedBlocks": encoded_blocks,
+    "status": "ready", 
+    "blockCount": len(blocks)
+}
+
+# Print the output
+print(json.dumps(output))
