@@ -328,25 +328,37 @@ def markdown_to_blocks(text):
                 })
             continue
         
-        # Enhanced Unordered lists with nesting support (- or *)
-        if line.lstrip().startswith('- ') or line.lstrip().startswith('* '):
-            def process_nested_list(start_index):
-                list_blocks = []
-                j = start_index
+        # Simplified 2-level unordered lists (- or *)
+        # Check if this is a proper list item (not just formatting asterisks)
+        if (line.lstrip().startswith('- ') or 
+            (line.lstrip().startswith('* ') and not line.lstrip().startswith('**'))):
+            
+            list_blocks = []
+            base_indent = len(line) - len(line.lstrip())  # Get the indentation of first item
+            
+            while i < len(lines):
+                current_line = lines[i]
+                stripped = current_line.lstrip()
                 
-                while j < len(lines):
-                    current_line = lines[j]
-                    stripped = current_line.lstrip()
+                # Check if this is a proper list item (not formatting)
+                is_list_item = (stripped.startswith('- ') or 
+                              (stripped.startswith('* ') and not stripped.startswith('**')))
+                
+                if not is_list_item:
+                    break
                     
-                    # Check if this is a list item
-                    if not (stripped.startswith('- ') or stripped.startswith('* ')):
-                        break
-                        
-                    # Calculate indentation level
-                    indent_level = len(current_line) - len(stripped)
-                    content = stripped[2:].strip()  # Remove '- ' or '* '
-                    
-                    # Create the list item block
+                # Calculate indentation level (spaces before the bullet)
+                current_indent = len(current_line) - len(stripped)
+                
+                # Extract content after the bullet marker
+                if stripped.startswith('- '):
+                    content = stripped[2:].strip()
+                else:  # starts with '* '
+                    content = stripped[2:].strip()
+                
+                # If this item has the same indentation as our base, it's a parent
+                if current_indent == base_indent:
+                    # Create parent list item
                     list_item = {
                         "object": "block",
                         "type": "bulleted_list_item", 
@@ -356,27 +368,48 @@ def markdown_to_blocks(text):
                         }
                     }
                     
-                    # Look ahead for children (more indented items)
+                    # Look ahead for immediate children (one level deeper only)
                     children = []
-                    k = j + 1
-                    while k < len(lines):
-                        next_line = lines[k]
+                    j = i + 1
+                    
+                    while j < len(lines):
+                        next_line = lines[j]
                         next_stripped = next_line.lstrip()
                         
                         if not next_stripped:  # Skip empty lines
-                            k += 1
+                            j += 1
                             continue
                             
-                        if not (next_stripped.startswith('- ') or next_stripped.startswith('* ')):
+                        # Check if next line is a proper list item
+                        next_is_list = (next_stripped.startswith('- ') or 
+                                      (next_stripped.startswith('* ') and not next_stripped.startswith('**')))
+                        
+                        if not next_is_list:
                             break
                             
                         next_indent = len(next_line) - len(next_stripped)
                         
-                        # If next item is more indented, it's a child
-                        if next_indent > indent_level:
-                            child_blocks, k = process_nested_list(k)
-                            children.extend(child_blocks)
+                        # If next item is more indented than base, it's a child
+                        if next_indent > base_indent:
+                            # Extract child content
+                            if next_stripped.startswith('- '):
+                                child_content = next_stripped[2:].strip()
+                            else:
+                                child_content = next_stripped[2:].strip()
+                                
+                            # Create child list item (no nested children)
+                            child_item = {
+                                "object": "block",
+                                "type": "bulleted_list_item",
+                                "bulleted_list_item": {
+                                    "rich_text": create_rich_text(child_content),
+                                    "color": "default"
+                                }
+                            }
+                            children.append(child_item)
+                            j += 1
                         else:
+                            # Same or less indentation - not a child, break
                             break
                     
                     # Add children if any
@@ -384,13 +417,13 @@ def markdown_to_blocks(text):
                         list_item["bulleted_list_item"]["children"] = children
                         
                     list_blocks.append(list_item)
-                    j = k if k > j + 1 else j + 1
-                    
-                return list_blocks, j
+                    i = j  # Move to next non-child item
+                else:
+                    # This shouldn't happen if our logic is correct, but safety break
+                    i += 1
             
-            # Process the nested list starting from current position
-            nested_blocks, i = process_nested_list(i)
-            blocks.extend(nested_blocks)
+            # Add all processed list blocks
+            blocks.extend(list_blocks)
             continue
         
         # Ordered lists (1. 2. etc.)
@@ -479,7 +512,7 @@ def markdown_to_blocks(text):
     return blocks
 
 # PUT YOUR MARKDOWN HERE
-my_markdown = """[markdown]"""
+my_markdown = """{MARKDOWN}"""
 
 # Try to get Input parameter first, then use hardcoded content
 try:
